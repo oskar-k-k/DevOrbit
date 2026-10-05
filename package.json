@@ -1,6 +1,6 @@
 {
   "name": "dev-orbit",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Windows-first local developer companion",
   "main": "src/main.cjs",
   "scripts": {

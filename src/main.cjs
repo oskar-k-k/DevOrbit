@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, shell, screen } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -6,7 +6,10 @@ const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const exec = promisify(execFile);
 const { associate } = require('./model.cjs');
+const { panelBounds, projectProcesses } = require('./panel.cjs');
+if (process.argv.includes('--smoke-test')) app.setPath('userData', path.join(__dirname, '..', '.smoke-profile'));
 let win, tray, quitting = false, config, configFile, scanning = false;
+let nativeDialogOpen = 0, lastBlur = 0;
 let inventory = [], scanError = null, scannedAt = null;
 const owned = new Map(), logs = new Map(), branches = new Map();
 const ps = script => exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 20000, maxBuffer: 16 * 1024 * 1024 });
@@ -33,7 +36,7 @@ function publish() {
           { label: 'Stoppen', enabled: s.managed, click: () => stop(p.id, s.id).catch(report) },
           ...(s.url ? [{ label: 'Im Browser öffnen', click: () => openUrl(s.url).catch(report) }] : [])
         ] })) ] })),
-      { type: 'separator' }, { label: `${inventory.filter(p => !p.projectId).length} nicht zugeordnete Prozesse`, enabled: false },
+      { type: 'separator' }, { label: `${inventory.length} Projektprozesse`, enabled: false },
       { label: 'Dev Orbit beenden', click: quit }
     ]));
   }
@@ -45,11 +48,7 @@ async function scan() {
     const { stdout } = await ps("$ErrorActionPreference='Stop'; $ports=@{}; Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object { $key=[string]$_.OwningProcess; if(!$ports.ContainsKey($key)){$ports[$key]=@()}; $ports[$key]+=$_.LocalPort }; $items=@(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;name=$_.Name;command=$_.CommandLine;created=$_.CreationDate.ToUniversalTime().ToString('o');ports=@($ports[[string]$_.ProcessId] | Sort-Object -Unique)} }); ConvertTo-Json -InputObject $items -Depth 4 -Compress");
     const all = JSON.parse(stdout.replace(/^\uFEFF/, ''));
     const assigned = associate(all, config.projects, owned);
-    inventory = assigned.filter(p => p.pid !== process.pid && (p.ports.length || p.projectId));
-    for (const p of inventory) {
-      const assignment = config.assignments[String(p.pid)];
-      if (assignment && assignment.created === p.created && config.projects.some(x => x.id === assignment.projectId)) { p.projectId = assignment.projectId; p.reason = 'Manuell zugewiesen'; }
-    }
+    inventory = projectProcesses(assigned.filter(p => p.pid !== process.pid), config.projects, config.assignments);
     await Promise.all(config.projects.map(async p => { try { const result = await exec('git', ['-C', p.directory, 'branch', '--show-current'], { windowsHide: true, timeout: 5000 }); branches.set(p.id, result.stdout.trim() || 'Detached HEAD'); } catch { branches.set(p.id, 'Kein Git-Repository'); } }));
     scanError = null; scannedAt = new Date().toISOString();
   } catch (error) { scanError = 'Windows-Erkennung fehlgeschlagen: ' + error.message; }
@@ -80,7 +79,20 @@ async function stop(projectId, serviceId) {
   owned.delete(entry[0]); await scan();
 }
 async function openUrl(url) { const parsed = new URL(url); if (!['http:', 'https:'].includes(parsed.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)) throw new Error('Nur lokale HTTP/HTTPS-Adressen sind erlaubt.'); await shell.openExternal(parsed.toString()); }
-function show() { win.show(); win.focus(); }
+function show() {
+  const anchor = tray?.getBounds();
+  const display = anchor && anchor.width ? screen.getDisplayMatching(anchor) : screen.getPrimaryDisplay();
+  win.setBounds(panelBounds(display.workArea)); win.show(); win.focus();
+}
+function toggle() {
+  if (win.isVisible()) win.hide();
+  else if (Date.now() - lastBlur > 250) show();
+}
+async function nativeDialog(callback) {
+  nativeDialogOpen++;
+  try { return await callback(); }
+  finally { nativeDialogOpen--; if (!quitting) show(); }
+}
 async function quit() {
   if (owned.size) { const response = await dialog.showMessageBox({ type: 'question', message: 'Dev Orbit beenden?', detail: 'Die gestarteten Services laufen weiter. Du kannst sie vor dem Beenden in der App stoppen.', buttons: ['Abbrechen', 'Beenden'], defaultId: 0, cancelId: 0 }); if (response.response !== 1) return; }
   quitting = true; app.quit();
@@ -89,7 +101,8 @@ ipcMain.handle('orbit', async (_, action, data = {}) => {
   try {
     if (action === 'state') return { ok: true, value: state() };
     if (action === 'scan') await scan();
-    else if (action === 'pickDirectory') { const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] }); return { ok: true, value: result.canceled ? null : result.filePaths[0] }; }
+    else if (action === 'hide') win.hide();
+    else if (action === 'pickDirectory') { const result = await nativeDialog(() => dialog.showOpenDialog(win, { properties: ['openDirectory'] })); return { ok: true, value: result.canceled ? null : result.filePaths[0] }; }
     else if (action === 'saveProject') {
       if (!data.name?.trim() || !path.isAbsolute(data.directory || '') || !fs.existsSync(data.directory)) throw new Error('Name und gültiger absoluter Projektpfad sind erforderlich.');
       const existing = config.projects.find(p => p.id === data.id);
@@ -120,7 +133,7 @@ ipcMain.handle('orbit', async (_, action, data = {}) => {
     else if (action === 'assign') { const p = inventory.find(p => p.pid === data.pid); if (!p || !config.projects.some(x => x.id === data.projectId)) throw new Error('Prozess oder Projekt fehlt.'); config.assignments[String(p.pid)] = { created: p.created, projectId: data.projectId }; save(); await scan(); }
     else if (action === 'kill') {
       const p = inventory.find(p => p.pid === data.pid); if (!p || p.managed || !p.ports.length) throw new Error('Nur externe Prozesse mit offenen Ports können hier beendet werden.');
-      const answer = await dialog.showMessageBox(win, { type: 'warning', message: `${p.name} (PID ${p.pid}) beenden?`, detail: `Ports: ${p.ports.join(', ')}\n${p.command || 'Befehlszeile nicht verfügbar'}\n\nDer Prozess wird zwangsweise beendet. Ungespeicherte Daten können verloren gehen.`, buttons: ['Abbrechen', 'Prozess beenden'], defaultId: 0, cancelId: 0 });
+      const answer = await nativeDialog(() => dialog.showMessageBox(win, { type: 'warning', message: `${p.name} (PID ${p.pid}) beenden?`, detail: `Ports: ${p.ports.join(', ')}\n${p.command || 'Befehlszeile nicht verfügbar'}\n\nDer Prozess wird zwangsweise beendet. Ungespeicherte Daten können verloren gehen.`, buttons: ['Abbrechen', 'Prozess beenden'], defaultId: 0, cancelId: 0 }));
       if (answer.response === 1) {
         const result = await ps(`$p=Get-CimInstance Win32_Process -Filter "ProcessId = ${p.pid}"; if($p){$p.CreationDate.ToUniversalTime().ToString('o')}`);
         if (result.stdout.trim() !== p.created) throw new Error('Prozess hat sich geändert. Bitte Erkennung aktualisieren.');
@@ -138,16 +151,27 @@ else {
     configFile = path.join(app.getPath('userData'), 'projects.json');
     try { config = JSON.parse(fs.readFileSync(configFile, 'utf8')); if (!Array.isArray(config.projects)) throw new Error('Ungültige Konfiguration'); config.assignments ||= {}; }
     catch (error) { config = { projects: [], assignments: {} }; if (fs.existsSync(configFile)) { fs.copyFileSync(configFile, configFile + `.backup-${Date.now()}`); dialog.showErrorBox('Konfiguration wiederhergestellt', 'Die beschädigte Konfiguration wurde als Backup gesichert.'); } }
-    win = new BrowserWindow({ width: 1280, height: 850, minWidth: 940, minHeight: 640, backgroundColor: '#10131b', title: 'Dev Orbit', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+    win = new BrowserWindow({ width: 440, height: 640, show: false, frame: false, resizable: false, maximizable: false, minimizable: false, skipTaskbar: true, alwaysOnTop: true, backgroundColor: '#10131b', title: 'Dev Orbit', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+    win.on('blur', () => {
+      if (!nativeDialogOpen) { lastBlur = Date.now(); win.hide(); }
+    });
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault());
     win.loadFile(path.join(__dirname, 'index.html'));
     win.on('close', event => { if (!quitting) { event.preventDefault(); win.hide(); } });
     const pixels = Buffer.alloc(32 * 32 * 4); for (let y=0;y<32;y++) for(let x=0;x<32;x++){ const d=Math.hypot(x-16,y-16); const i=(y*32+x)*4; if(d<8 || (d>12 && d<14)){pixels[i]=148;pixels[i+1]=128;pixels[i+2]=255;pixels[i+3]=255;} }
-    tray = new Tray(nativeImage.createFromBuffer(pixels, { width: 32, height: 32 })); tray.on('click', show); publish();
+    tray = new Tray(nativeImage.createFromBuffer(pixels, { width: 32, height: 32 })); tray.on('click', toggle); publish();
     if (process.argv.includes('--smoke-test')) {
       win.webContents.once('did-finish-load', async () => {
         await scan();
+        const startsHidden = !win.isVisible();
+        show();
+        await new Promise(resolve => setTimeout(resolve, 400));
+        const size = win.getBounds();
+        win.blur();
+        win.emit('blur');
+        await new Promise(resolve => setTimeout(resolve, 400));
+        const hidesOnBlur = !win.isVisible();
         const rendered = await win.webContents.executeJavaScript("({title:document.title,heading:document.querySelector('h1').textContent,bridge:typeof window.orbit.call,node:typeof require})");
         let lifecycle = false;
         const smokeProject = { id: id(), name: 'Smoke test', directory: __dirname, services: [{ id: id(), name: 'Lifecycle', command: "Write-Output 'ORBIT_SMOKE'; Start-Sleep -Seconds 30", ports: [], directory: '', url: '' }] };
@@ -160,8 +184,9 @@ else {
           lifecycle = started && !serviceState(smokeProject, smokeProject.services[0]).managed && (logs.get(smokeProject.services[0].id) || '').includes('ORBIT_SMOKE');
         } catch (error) { console.error(error.message); }
         config.projects = config.projects.filter(p => p.id !== smokeProject.id);
-        console.log(JSON.stringify({ rendered, lifecycle, processes: inventory.length, scanError }));
-        quitting = true; app.exit(scanError || !lifecycle || rendered.bridge !== 'function' || rendered.node !== 'undefined' ? 1 : 0);
+        const projectOnly = inventory.every(p => config.projects.some(project => project.id === p.projectId));
+        console.log(JSON.stringify({ rendered, lifecycle, startsHidden, hidesOnBlur, size, projectOnly, processes: inventory.length, scanError }));
+        quitting = true; app.exit(scanError || !lifecycle || !startsHidden || !hidesOnBlur || !projectOnly || rendered.bridge !== 'function' || rendered.node !== 'undefined' ? 1 : 0);
       });
     } else { scan(); setInterval(scan, 6000); }
   });

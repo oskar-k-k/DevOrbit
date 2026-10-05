@@ -11,7 +11,9 @@ npm.cmd install
 npm.cmd start
 ```
 
-Create a project, choose its existing directory and add services. For npm services use `npm.cmd run dev` as the PowerShell command. Services can use a separate absolute working directory. Closing the window keeps Dev Orbit in the tray. The tray menu opens the app, starts/stops managed services and exits.
+Dev Orbit starts as an icon in the Windows notification area, without a taskbar window. Left-click the icon to toggle a compact panel at the bottom-right of that monitor. Clicking outside or pressing Escape hides the panel. Click a project to expand its services. Right-click the tray icon for service actions and Exit. Windows may initially put the icon under the notification area's hidden-icons arrow.
+
+Create a project, choose its existing directory and add services. For npm services use `npm.cmd run dev` as the PowerShell command. Services can use a separate absolute working directory.
 
 ```powershell
 npm.cmd test
@@ -23,7 +25,7 @@ The Windows installer is written to `dist/`. Project configuration is stored in 
 
 ## Discovery and process safety
 
-Every six seconds Dev Orbit queries `Win32_Process` and `Get-NetTCPConnection`. It includes TCP listeners across the system and processes associated with projects. Command lines with an unambiguous full project path can be assigned automatically. Owned descendants inherit the project and service association. Ports alone never assign a project. Manual assignments are tied to PID and process creation time to prevent reuse errors.
+Every six seconds Dev Orbit queries `Win32_Process` and `Get-NetTCPConnection` internally to identify project services. Only processes associated with configured projects are exposed in the panel, tray counts and port counts. Unrelated Windows processes and unassigned listeners are excluded. Command lines with an unambiguous full project path can be assigned automatically. Owned descendants inherit the project and service association. Ports alone never assign a project. Previously saved manual assignments are tied to PID and process creation time to prevent reuse errors.
 
 Windows does not expose arbitrary process working directories through CIM. Relative commands started outside Dev Orbit can therefore remain unassigned. Restricted processes may have no readable command line. UDP endpoints and Docker container metadata are not yet integrated; published Docker TCP ports appear as Windows listeners.
 

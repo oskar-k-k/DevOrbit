@@ -3,3 +3,4 @@ dist/
 *.log
 electron-runtime.zip
 smoke-preview.png
+electron-checksums.txt

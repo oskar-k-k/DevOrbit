@@ -69,10 +69,14 @@ async function start(projectId, serviceId) {
   publish(); setTimeout(scan, 1200);
 }
 async function stop(projectId, serviceId) {
-  find(projectId, serviceId);
+  const { project, service } = find(projectId, serviceId);
   const entry = [...owned.entries()].find(([, v]) => v.serviceId === serviceId);
   if (!entry) throw new Error('Dieser Service wurde extern gestartet. Nutze die Prozessansicht zum kontrollierten Beenden.');
-  await exec('taskkill.exe', ['/PID', String(entry[0]), '/T', '/F'], { windowsHide: true, timeout: 10000 });
+  if (service.stopCommand) {
+    const result = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', service.stopCommand], { cwd: service.directory || project.directory, windowsHide: true, timeout: 10000 });
+    addLog(serviceId, result.stdout + result.stderr);
+  }
+  if (owned.has(entry[0])) await exec('taskkill.exe', ['/PID', String(entry[0]), '/T', '/F'], { windowsHide: true, timeout: 10000 });
   owned.delete(entry[0]); await scan();
 }
 async function openUrl(url) { const parsed = new URL(url); if (!['http:', 'https:'].includes(parsed.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)) throw new Error('Nur lokale HTTP/HTTPS-Adressen sind erlaubt.'); await shell.openExternal(parsed.toString()); }
@@ -102,7 +106,7 @@ ipcMain.handle('orbit', async (_, action, data = {}) => {
       if (ports.some(n => !Number.isInteger(n) || n < 1 || n > 65535)) throw new Error('Ports müssen zwischen 1 und 65535 liegen.');
       if (data.url) { const u = new URL(data.url); if (!['http:', 'https:'].includes(u.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) throw new Error('URL muss eine lokale HTTP/HTTPS-Adresse sein.'); }
       if (data.directory && (!path.isAbsolute(data.directory) || !fs.existsSync(data.directory))) throw new Error('Ungültiges Service-Verzeichnis.');
-      const service = { id: data.id || id(), name: data.name.trim(), type: data.type || 'Custom', command: data.command.trim(), directory: data.directory || '', ports: [...new Set(ports)], url: data.url || '' };
+      const service = { id: data.id || id(), name: data.name.trim(), type: data.type || 'Custom', command: data.command.trim(), stopCommand: data.stopCommand?.trim() || '', directory: data.directory || '', ports: [...new Set(ports)], url: data.url || '' };
       const index = project.services.findIndex(s => s.id === service.id);
       if ([...owned.values()].some(x => x.serviceId === service.id)) throw new Error('Stoppe den Service vor dem Bearbeiten.');
       if (index < 0) project.services.push(service); else project.services[index] = service;
@@ -145,9 +149,19 @@ else {
       win.webContents.once('did-finish-load', async () => {
         await scan();
         const rendered = await win.webContents.executeJavaScript("({title:document.title,heading:document.querySelector('h1').textContent,bridge:typeof window.orbit.call,node:typeof require})");
-        fs.writeFileSync(path.join(__dirname, '..', 'smoke-preview.png'), (await win.webContents.capturePage()).toPNG());
-        console.log(JSON.stringify({ rendered, processes: inventory.length, scanError }));
-        quitting = true; app.exit(scanError || rendered.bridge !== 'function' || rendered.node !== 'undefined' ? 1 : 0);
+        let lifecycle = false;
+        const smokeProject = { id: id(), name: 'Smoke test', directory: __dirname, services: [{ id: id(), name: 'Lifecycle', command: "Write-Output 'ORBIT_SMOKE'; Start-Sleep -Seconds 30", ports: [], directory: '', url: '' }] };
+        config.projects.push(smokeProject);
+        try {
+          await start(smokeProject.id, smokeProject.services[0].id);
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          const started = serviceState(smokeProject, smokeProject.services[0]).managed;
+          await stop(smokeProject.id, smokeProject.services[0].id);
+          lifecycle = started && !serviceState(smokeProject, smokeProject.services[0]).managed && (logs.get(smokeProject.services[0].id) || '').includes('ORBIT_SMOKE');
+        } catch (error) { console.error(error.message); }
+        config.projects = config.projects.filter(p => p.id !== smokeProject.id);
+        console.log(JSON.stringify({ rendered, lifecycle, processes: inventory.length, scanError }));
+        quitting = true; app.exit(scanError || !lifecycle || rendered.bridge !== 'function' || rendered.node !== 'undefined' ? 1 : 0);
       });
     } else { scan(); setInterval(scan, 6000); }
   });

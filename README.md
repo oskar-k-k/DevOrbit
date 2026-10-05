@@ -29,7 +29,9 @@ Windows does not expose arbitrary process working directories through CIM. Relat
 
 Start executes the configured PowerShell command with the current user's permissions. Stop/restart kills the process tree started by Dev Orbit. External processes can be terminated only through the process view, after a native confirmation and creation-time check; only that PID is terminated. No automatic process termination or administrator elevation is performed. Service status for externally launched processes uses the assigned project plus the service's configured ports. Logs are only captured for services started by Dev Orbit.
 
-Exiting leaves services running. After restarting Dev Orbit, surviving services are discovered as external processes and can be manually assigned if their command line does not identify the project. Stop them before exiting if desired. Custom stop commands and persistent log history are future extensions.
+An optional PowerShell stop command runs first (10-second timeout), followed by termination of any remaining owned process tree. This is useful for `docker compose down` when a service was started with `docker compose up` in the foreground. Detached containers require a later Docker integration.
+
+Exiting leaves services running. After restarting Dev Orbit, surviving services are discovered as external processes and can be manually assigned if their command line does not identify the project. Stop them before exiting if desired. Persistent log history is a future extension.
 
 ## Structure
 

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.log
+electron-runtime.zip
+smoke-preview.png

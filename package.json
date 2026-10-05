@@ -1,0 +1,31 @@
+{
+  "name": "dev-orbit",
+  "version": "1.0.0",
+  "description": "Windows-first local developer companion",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "check": "node --check src/main.cjs && node --check src/model.cjs && node --check src/renderer.js",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "local.devorbit.app",
+    "productName": "Dev Orbit",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-tray/
 dist-auto/
+dist-fixed/
 *.log
 electron-runtime.zip
 smoke-preview.png

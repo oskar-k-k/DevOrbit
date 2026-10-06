@@ -3,7 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const YAML = require('yaml');
 const { inside } = require('./model.cjs');
-const ignored = new Set(['node_modules', '.git', '.venv', 'venv', 'dist', 'dist-tray', 'dist-auto', 'build', 'target', 'bin', 'obj', '.next', '.idea', '.codex', '.smoke-profile', 'vendor', 'coverage']);
+const ignored = new Set(['node_modules', '.git', '.venv', 'venv', 'dist', 'dist-tray', 'dist-auto', 'dist-fixed', 'build', 'target', 'bin', 'obj', '.next', '.idea', '.codex', '.smoke-profile', 'vendor', 'coverage']);
 const quote = text => "'" + String(text).replaceAll("'", "''") + "'";
 const stableId = (directory, key) => 'auto-' + crypto.createHash('sha256').update(path.resolve(directory).toLowerCase() + ':' + key).digest('hex').slice(0, 20);
 function portsIn(command) {
@@ -34,7 +34,8 @@ async function discoverProject(directory) {
         for (const [script, command] of Object.entries(pkg.scripts || {})) {
           if (!/^(?:dev|start|serve|watch|preview)(?::[\w-]+)*$/.test(script) || typeof command !== 'string') continue;
           const ports = portsIn(command);
-          services.push({ id: stableId(folder, 'npm:' + script), name: displayName(script), type: inferType(command), command: `${manager === 'bun' ? 'bun.exe' : manager + '.cmd'} run ${quote(script)}`, script, scriptCommand: command, matchToken: fingerprint(command), directory: folder, ports, url: '', source: path.join(folder, 'package.json'), autoDetected: true });
+          const launcher = !!pkg.workspaces && !/vite|next|react-scripts|astro|nuxt|webpack|ng serve/i.test(command);
+          services.push({ id: stableId(folder, 'npm:' + script), name: displayName(script), type: launcher ? 'Launcher' : inferType(command), launcher, command: `${manager === 'bun' ? 'bun.exe' : manager + '.cmd'} run ${quote(script)}`, script, scriptCommand: command, matchToken: fingerprint(command), directory: folder, ports, url: '', source: path.join(folder, 'package.json'), autoDetected: true });
         }
       } catch { notes.push('package.json konnte nicht gelesen werden: ' + (relative || '.')); }
     }
@@ -89,17 +90,21 @@ async function discoverProject(directory) {
   if (visited >= 1200) notes.push('Ordnersuche auf 1200 Verzeichnisse begrenzt.');
   return { services, notes, scannedAt: Date.now() };
 }
-function matchProcess(service, process, project) {
-  if (process.projectId !== project.id) return false;
-  if (process.serviceId === service.id) return true;
-  // Compose published ports belong to Docker's shared host; a port is not proof of ownership.
-  if (service.composeService) return false;
+function matchScore(service, process, project) {
+  if (process.projectId !== project.id || service.composeService) return 0;
   const directory = service.directory || project.directory;
-  if (service.script && process.launchScript && inside(process.command, directory)) return service.script === process.launchScript;
-  if (service.ports.some(port => process.ports.includes(port)) && (!service.autoDetected || inside(process.command, directory))) return true;
-  if (!service.matchToken || !inside(process.command, directory)) return false;
+  const directoryMatch = inside(process.command, directory);
+  const specificity = path.win32.resolve(directory).split(/[\\/]/).length;
+  // Once project ownership is established, an app's explicit port is stronger
+  // evidence than an ancestor's generic `npm run dev` launcher.
+  if ((service.ports || []).some(port => process.ports.includes(port))) return 1000 + specificity + (service.script && service.script === process.launchScript ? 20 : 0);
+  if (process.serviceId === service.id) return 50 + specificity;
+  if (!directoryMatch) return 0;
+  const scriptMatch = service.script && process.launchScript === service.script;
+  if (service.script && process.launchScript && !scriptMatch) return 0;
   const command = (process.command || '').replaceAll('\\', '/').toLowerCase();
-  return command.includes(service.matchToken.toLowerCase());
+  if (service.matchToken && command.includes(service.matchToken.toLowerCase())) return 100 + specificity * 10;
+  return scriptMatch ? 60 + specificity * 10 : 0;
 }
 function resolveServices(project, discovered, inventory, owned = new Map()) {
   const manual = project.services || [];
@@ -114,20 +119,38 @@ function resolveServices(project, discovered, inventory, owned = new Map()) {
   const services = [...combined.values()];
   const processMatches = new Map();
   for (const p of inventory.filter(p => p.projectId === project.id)) {
-    const explicit = services.filter(s => p.serviceId === s.id);
-    const matches = explicit.length ? explicit : services.filter(s => matchProcess(s, p, project));
+    const scores = services.map(s => ({id:s.id,score:matchScore(s,p,project)})).filter(s=>s.score>0);
+    const highest = Math.max(0,...scores.map(s=>s.score));
+    const matches = scores.filter(s=>s.score===highest);
     if (matches.length === 1) processMatches.set(p.pid, matches[0].id);
   }
   const result = services.map(s => {
     const entries = [...owned.values()].filter(v => v.serviceId === s.id);
-    const found = inventory.filter(p => processMatches.get(p.pid) === s.id);
+    const aliases = new Set(services.filter(other => other.id !== s.id && path.win32.resolve(other.directory || project.directory).toLowerCase() === path.win32.resolve(s.directory || project.directory).toLowerCase() && ((s.ports || []).some(port => (other.ports || []).includes(port)) || (s.scriptCommand && normalize(s.scriptCommand) === normalize(other.scriptCommand)))).map(other=>other.id));
+    const directIds = new Set([s.id,...aliases]);
+    const found = inventory.filter(p => p.projectId === project.id && (directIds.has(processMatches.get(p.pid)) || directIds.has(p.serviceId) || (p.ancestorPids || []).some(pid=>directIds.has(processMatches.get(pid))) || (!s.matchToken && s.script && (p.launchScripts || [p.launchScript]).includes(s.script) && inside(p.command,s.directory || project.directory))));
     const actualPorts = [...new Set(found.flatMap(p => p.ports))];
     const ports = actualPorts.length ? actualPorts : s.ports;
-    return { ...s, ports, configuredPorts: s.ports, configuredUrl: s.url, running: !!entries.length || !!found.length, managed: !!entries.length, pids: [...new Set(found.map(p=>p.pid).concat(entries.map(v=>v.child.pid)))], url: s.url || (['Frontend','Backend'].includes(s.type) && actualPorts.length ? 'http://localhost:' + actualPorts[0] : '') };
+    const duplicatePids = found.filter(p => p.ports.length && processMatches.get(p.pid) === s.id).map(p=>p.pid);
+    return { ...s, ports, configuredPorts: s.ports, configuredUrl: s.url, running: !!entries.length || !!found.length, managed: !!entries.length, activeElsewhere: !entries.length && found.length > 0 && !found.some(p=>processMatches.get(p.pid)===s.id), duplicate: duplicatePids.length > 1, pids: [...new Set(found.map(p=>p.pid).concat(entries.map(v=>v.child.pid)))], url: s.url || (['Frontend','Backend'].includes(s.type) && actualPorts.length ? 'http://localhost:' + actualPorts[0] : '') };
   });
   for (const p of inventory.filter(p => p.projectId === project.id && p.ports.length && !processMatches.has(p.pid))) {
     result.push({ id: 'live-' + p.pid + '-' + p.created, name: `${p.name} · :${p.ports.join(', :')}`, type: 'Erkannt', command: '', processCommand: p.command || '', directory: project.directory, ports: p.ports, url: '', running: true, managed: false, pids: [p.pid], runtimeOnly: true, autoDetected: true, source: 'Laufender Projektprozess' });
   }
   return result;
 }
-module.exports = { discoverProject, resolveServices, portsIn, quote };
+function startConflict(service, services, inventory) {
+  if (service.running) return `Service läuft bereits (PID ${(service.pids || []).join(', ')}).`;
+  const pendingAlias = services.find(s => s.id !== service.id && s.running && path.win32.resolve(s.directory || '').toLowerCase() === path.win32.resolve(service.directory || '').toLowerCase() && ((service.configuredPorts || service.ports || []).some(port => (s.configuredPorts || s.ports || []).includes(port)) || (service.scriptCommand && service.scriptCommand === s.scriptCommand) || (service.matchToken && service.matchToken === s.matchToken)));
+  if (pendingAlias) return `Start verhindert: ${pendingAlias.name} ist für diese App bereits aktiv oder startet gerade.`;
+  const occupied = inventory.filter(p => (service.configuredPorts || service.ports || []).some(port => p.ports.includes(port)));
+  if (occupied.length) return `Start verhindert: Port bereits belegt (PID ${occupied.map(p=>p.pid).join(', ')}).`;
+  // Starting a project-wide launcher while one of its child apps is already up
+  // would relaunch those children, even if the launcher itself has exited.
+  if (service.script && (service.launcher || !service.matchToken)) {
+    const running = services.filter(s => s.id !== service.id && s.running && inside('"' + (s.directory || '') + '"',service.directory));
+    if (running.length) return `Start verhindert: ${running.map(s=>s.name).join(', ')} läuft bereits. Starte nur die fehlenden Apps einzeln.`;
+  }
+  return null;
+}
+module.exports = { discoverProject, resolveServices, portsIn, quote, startConflict };

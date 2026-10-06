@@ -15,14 +15,16 @@ function render() {
   const projects = selected ? current.projects.filter(p => p.id === selected) : current.projects;
   $('#heading').textContent = selected ? (projects[0]?.name || 'Projekt') : 'Deine Projekte';
   $('#subtitle').textContent = 'Projekt aufklappen, Services steuern.';
-  const running = current.projects.flatMap(p => p.services).filter(s => s.running).length;
+  const running = current.processes.filter(p=>p.ports.length).length;
   const ports = new Set(current.processes.flatMap(p => p.ports)).size;
-  $('#content').innerHTML = `<div class="stats"><div class="stat"><span class="stat-label">Projekte</span><strong>${current.projects.length}</strong></div><div class="stat"><span class="stat-label">Aktive Services</span><strong>${running}</strong></div><div class="stat"><span class="stat-label">Projekt-Ports</span><strong>${ports}</strong></div></div>` + (projects.length ? `<div class="projects">${projects.map(projectCard).join('')}</div>` : `<div class="empty"><div class="empty-icon">◎</div><h2>Dein erstes Projekt</h2><p>Wähle einen Projektordner und füge seine Services hinzu.</p>${button('+ Projekt hinzufügen','newProject')}</div>`);
+  $('#content').innerHTML = `<div class="stats"><div class="stat"><span class="stat-label">Projekte</span><strong>${current.projects.length}</strong></div><div class="stat"><span class="stat-label">Apps mit Ports</span><strong>${running}</strong></div><div class="stat"><span class="stat-label">Projekt-Ports</span><strong>${ports}</strong></div></div>` + (projects.length ? `<div class="projects">${projects.map(projectCard).join('')}</div>` : `<div class="empty"><div class="empty-icon">◎</div><h2>Dein erstes Projekt</h2><p>Wähle einen Projektordner und füge seine Services hinzu.</p>${button('+ Projekt hinzufügen','newProject')}</div>`);
   enhanceProjectCards(projects);
 }
 function enhanceProjectCards(projects) {
   document.querySelectorAll('.projects > .card').forEach((card, index) => {
     const project = projects[index];
+    const listeners = current.processes.filter(p=>p.projectId===project.id && p.ports.length).length;
+    card.querySelector('.card-head > .badge').textContent = `${listeners} Apps aktiv`;
     card.querySelectorAll(':scope > .service').forEach((row, serviceIndex) => {
       const service = project.services[serviceIndex]; if (!service) return;
       row.querySelector('[data-action=start]').disabled = service.running || !service.command;
@@ -30,6 +32,8 @@ function enhanceProjectCards(projects) {
       row.querySelector('[data-action=deleteService]').disabled = service.managed || service.runtimeOnly;
       if (service.runtimeOnly) row.querySelector('[data-action=editService]').textContent = 'Start konfigurieren';
       if (service.autoDetected) row.querySelector('.service-type').textContent = 'Auto · ' + service.type;
+      if (service.activeElsewhere) row.querySelector('.service-top > .badge').textContent = 'App bereits aktiv';
+      if (service.duplicate) { const note = document.createElement('p'); note.className = 'discovery-note'; note.textContent = 'Mehrere Listener-Prozesse für diese App – mögliche Doppelstarts prüfen.'; row.append(note); }
       const command = row.querySelector('.command');
       command.textContent = service.command ? 'Start: ' + service.command : 'Startbefehl noch unbekannt';
       if (service.source || service.processCommand) {
@@ -53,7 +57,7 @@ function renderProcesses() {
 }
 function renderSettings() {
   $('#heading').textContent = 'Einstellungen'; $('#subtitle').textContent = 'Dein lokaler Begleiter, so wie du ihn brauchst.';
-  $('#content').innerHTML = `<div class="card settings"><h2>Windows-Integration</h2><div class="settings-row"><div><b>Mit Windows starten</b><p>Dev Orbit beim Anmelden im System-Tray starten.</p></div><input type="checkbox" id="autoStart" ${current.autoStart ? 'checked' : ''}></div><div class="settings-row"><div><b>System-Tray</b><p>Klicke auf das Tray-Icon, um dieses Fenster zu öffnen. Ein Klick außerhalb blendet es aus. Rechtsklick auf das Icon bietet Beenden.</p></div></div><div class="settings-row"><div><b>Lokale Daten</b><p>Projektkonfiguration wird im Windows-Benutzerprofil gespeichert. Logs bleiben für diese App-Sitzung verfügbar. Gestartete Services laufen beim Beenden weiter.</p></div></div><p>Version 1.2 · Windows-first · Keine Cloud erforderlich</p></div>`;
+  $('#content').innerHTML = `<div class="card settings"><h2>Windows-Integration</h2><div class="settings-row"><div><b>Mit Windows starten</b><p>Dev Orbit beim Anmelden im System-Tray starten.</p></div><input type="checkbox" id="autoStart" ${current.autoStart ? 'checked' : ''}></div><div class="settings-row"><div><b>System-Tray</b><p>Klicke auf das Tray-Icon, um dieses Fenster zu öffnen. Ein Klick außerhalb blendet es aus. Rechtsklick auf das Icon bietet Beenden.</p></div></div><div class="settings-row"><div><b>Lokale Daten</b><p>Projektkonfiguration wird im Windows-Benutzerprofil gespeichert. Logs bleiben für diese App-Sitzung verfügbar. Gestartete Services laufen beim Beenden weiter.</p></div></div><p>Version 1.2.1 · Windows-first · Keine Cloud erforderlich</p></div>`;
 }
 function field(name, label, value = '', placeholder = '') { return `<label for="f-${name}">${label}</label><input id="f-${name}" name="${name}" value="${escape(value)}" placeholder="${escape(placeholder)}">`; }
 function editProject(project) {
@@ -62,7 +66,7 @@ function editProject(project) {
 }
 function editService(projectId, service) {
   editing = { kind: 'service', projectId, id: service?.id }; $('#modalTitle').textContent = service ? 'Service bearbeiten' : 'Service hinzufügen';
-  $('#fields').innerHTML = field('name','Servicename',service?.name,'Frontend') + `<label>Typ</label><select name="type">${['Frontend','Backend','Database','Worker','Custom'].map(type => `<option ${service?.type === type ? 'selected' : ''}>${type}</option>`).join('')}</select>` + field('command','Startbefehl (PowerShell)',service?.command,'npm.cmd run dev') + field('stopCommand','Stopbefehl (optional, danach verbleibende Prozesse beenden)',service?.stopCommand) + field('directory','Arbeitsverzeichnis (leer = Projektverzeichnis)',service?.directory) + field('ports','Ports (durch Komma getrennt)',(service?.configuredPorts || service?.ports)?.join(', '),'3000, 3001') + field('url','Lokale URL (optional)',service?.configuredUrl ?? service?.url,'http://localhost:3000') + '<p>Befehle werden mit deinen Windows-Benutzerrechten ausgeführt.</p>'; openEditor();
+  $('#fields').innerHTML = field('name','Servicename',service?.name,'Frontend') + `<label>Typ</label><select name="type">${['Frontend','Backend','Database','Worker','Launcher','Custom'].map(type => `<option ${service?.type === type ? 'selected' : ''}>${type}</option>`).join('')}</select>` + field('command','Startbefehl (PowerShell)',service?.command,'npm.cmd run dev') + field('stopCommand','Stopbefehl (optional, danach verbleibende Prozesse beenden)',service?.stopCommand) + field('directory','Arbeitsverzeichnis (leer = Projektverzeichnis)',service?.directory) + field('ports','Ports (durch Komma getrennt)',(service?.configuredPorts || service?.ports)?.join(', '),'3000, 3001') + field('url','Lokale URL (optional)',service?.configuredUrl ?? service?.url,'http://localhost:3000') + '<p>Befehle werden mit deinen Windows-Benutzerrechten ausgeführt.</p>'; openEditor();
 }
 function openEditor() { $('#formError').textContent = ''; $('#editor').showModal(); }
 document.addEventListener('click', async event => {

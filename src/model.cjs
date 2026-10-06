@@ -26,4 +26,21 @@ function associate(processes, projects, owned) {
     return { ...p, projectId: matches.length === 1 ? matches[0].id : null, managed: false, reason: matches.length === 1 ? 'Projektpfad in Befehlszeile' : 'Keine eindeutige Zuordnung' };
   });
 }
-module.exports = { inside, associate };
+function annotateLineage(processes, all) {
+  const byPid = new Map(all.map(p=>[p.pid,p]));
+  return processes.map(p=>{
+    const launchScripts = [], ancestorPids = [], seen = new Set();
+    let current = p;
+    while(current && !seen.has(current.pid) && seen.size < 32) {
+      seen.add(current.pid);
+      if(current.pid !== p.pid) ancestorPids.push(current.pid);
+      if(/npm-cli|pnpm|yarn|bun/i.test(current.command || '')) {
+        const script = current.command.match(/\b(?:run|run-script)\s+["']?([\w:-]+)/i)?.[1];
+        if(script) launchScripts.push(script);
+      }
+      current = byPid.get(current.parentPid);
+    }
+    return {...p,launchScript:launchScripts[0],launchScripts,ancestorPids};
+  });
+}
+module.exports = { inside, associate, annotateLineage };

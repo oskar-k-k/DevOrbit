@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { discoverProject, resolveServices, portsIn, quote } = require('../src/discovery.cjs');
+const { discoverProject, resolveServices, portsIn, quote, startConflict } = require('../src/discovery.cjs');
 test('Discovery finds nested scripts, .NET profiles and Compose without executing code', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'orbit-discovery-')); t.after(() => fs.rm(root,{recursive:true,force:true}));
   await fs.mkdir(path.join(root,'apps','web'),{recursive:true});
@@ -70,4 +70,38 @@ test('Python web entry points become launchable services without running Python'
   assert.equal(result.services.length,3);
   assert.ok(result.services.some(s=>s.command==='python.exe -m uvicorn main:app --reload'));
   assert.ok(result.services.some(s=>s.command==='python.exe -m flask --app app:server run'));
+});
+test('Monorepo app listeners belong to apps even when started by the root dev script',()=>{
+  const root = {...candidate,id:'root',directory:'C:\\Repo',matchToken:null};
+  const leaf = {...candidate,id:'leaf',directory:'C:\\Repo\\apps\\lab',ports:[10038]};
+  const other = {...leaf,id:'other',directory:'C:\\Repo\\apps\\other',ports:[10039]};
+  const processes = [{...process,command:'node C:\\Repo\\node_modules\\vite\\bin\\vite.js',launchScript:'dev',ports:[10038]}];
+  const result = resolveServices(project,[root,leaf,other],processes);
+  assert.equal(result.find(s=>s.id==='root').running,true);
+  assert.equal(result.find(s=>s.id==='leaf').running,true);
+  assert.deepEqual(result.find(s=>s.id==='leaf').ports,[10038]);
+  assert.deepEqual(result.find(s=>s.id==='leaf').pids,[20]);
+  assert.equal(result.find(s=>s.id==='other').running,false);
+  assert.ok(startConflict(result.find(s=>s.id==='leaf'),result,processes));
+});
+test('Nested app path beats inherited ownership of a managed project launcher',()=>{
+  const root = {...candidate,id:'root',directory:'C:\\Repo',matchToken:null};
+  const leaf = {...candidate,id:'leaf',directory:'C:\\Repo\\web'};
+  const result = resolveServices(project,[root,leaf],[{...process,serviceId:'root',managed:true,launchScript:'dev'}]);
+  assert.equal(result.find(s=>s.id==='root').running,true);
+  assert.equal(result.find(s=>s.id==='leaf').running,true);
+});
+test('Same-script aliases cannot restart an already running app',()=>{
+  const dev = {...candidate,id:'dev',script:'dev',ports:[5173]};
+  const start = {...dev,id:'start',script:'start'};
+  const result = resolveServices(project,[dev,start],[{...process,launchScript:'dev'}]);
+  assert.ok(startConflict(result.find(s=>s.id==='start'),result,[process]));
+});
+test('Start check blocks unrelated listeners and partially running launchers',()=>{
+  const root = {...candidate,id:'root',directory:'C:\\Repo',matchToken:null,running:false};
+  const leaf = {...candidate,id:'leaf',running:true};
+  assert.ok(startConflict(root,[root,leaf],[]));
+  assert.ok(startConflict({...candidate,configuredPorts:[5173],running:false},[],[{...process,projectId:'other'}]));
+  assert.equal(startConflict({...candidate,running:false},[],[]),null);
+  assert.ok(startConflict({...candidate,id:'alias',running:false},[{...candidate,running:true}],[]));
 });

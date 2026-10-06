@@ -1,6 +1,6 @@
 {
   "name": "dev-orbit",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Windows-first local developer companion",
   "main": "src/main.cjs",
   "scripts": {
@@ -26,7 +26,23 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "extraResources": [
+      {
+        "from": "src/orbit-cli.cjs",
+        "to": "cli/orbit-cli.cjs"
+      },
+      {
+        "from": "src/journal.cjs",
+        "to": "cli/journal.cjs"
+      }
+    ],
+    "extraFiles": [
+      {
+        "from": "dev-orbit.cmd",
+        "to": "dev-orbit.cmd"
+      }
+    ]
   },
   "dependencies": {
     "yaml": "^2.9.1"

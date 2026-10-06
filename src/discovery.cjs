@@ -3,7 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const YAML = require('yaml');
 const { inside } = require('./model.cjs');
-const ignored = new Set(['node_modules', '.git', '.venv', 'venv', 'dist', 'dist-tray', 'dist-auto', 'dist-fixed', 'build', 'target', 'bin', 'obj', '.next', '.idea', '.codex', '.smoke-profile', 'vendor', 'coverage']);
+const ignored = new Set(['node_modules', '.git', '.venv', 'venv', 'dist', 'dist-tray', 'dist-auto', 'dist-fixed', 'dist-journal', 'build', 'target', 'bin', 'obj', '.next', '.idea', '.codex', '.smoke-profile', 'vendor', 'coverage']);
 const quote = text => "'" + String(text).replaceAll("'", "''") + "'";
 const stableId = (directory, key) => 'auto-' + crypto.createHash('sha256').update(path.resolve(directory).toLowerCase() + ':' + key).digest('hex').slice(0, 20);
 function portsIn(command) {

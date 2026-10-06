@@ -2,6 +2,8 @@ const $ = selector => document.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 let current = { projects: [], processes: [] }, view = 'overview', selected = null, editing = null, logService = null;
 const expanded = new Set();
+const expandedGroups=new Set(), expandedApps=new Set();
+let activityEntries=[], activityProject='', activityOutput=true;
 async function call(action, data) { const result = await window.orbit.call(action, data); if (!result.ok) throw new Error(result.error); return result.value; }
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; setTimeout(() => $('#toast').hidden = true, 5500); }
 function button(label, action, attrs = '', disabled = false) { return `<button data-action="${action}" ${attrs} ${disabled ? 'disabled' : ''}>${label}</button>`; }
@@ -11,6 +13,7 @@ function render() {
   $('#error').hidden = !current.scanError; $('#error').textContent = current.scanError || '';
   $('#scanTime').textContent = current.scannedAt ? 'Letzte Erkennung: ' + new Date(current.scannedAt).toLocaleTimeString('de-DE') + ' · alle 6 Sekunden' : 'Windows-Erkennung wird gestartet …';
   if (view === 'processes') return renderProcesses();
+  if (view === 'activity') return renderActivity();
   if (view === 'settings') return renderSettings();
   const projects = selected ? current.projects.filter(p => p.id === selected) : current.projects;
   $('#heading').textContent = selected ? (projects[0]?.name || 'Projekt') : 'Deine Projekte';
@@ -46,7 +49,35 @@ function enhanceProjectCards(projects) {
     const rescan = document.createElement('button'); rescan.dataset.action = 'discover'; rescan.dataset.p = project.id; rescan.textContent = '↻ Erkennen'; rescan.title = 'Projektdateien erneut nach Services durchsuchen';
     card.querySelector('.card-bottom > div').prepend(rescan);
     for (const note of project.discoveryNotes || []) { const text = document.createElement('p'); text.className = 'discovery-note'; text.textContent = note; card.append(text); }
+    const rows=new Map([...card.querySelectorAll(':scope > .service')].map((row,i)=>[project.services[i]?.id,row]));
+    const bottom=card.querySelector('.card-bottom');
+    for(const group of project.groups || []) {
+      const section=document.createElement('section');section.className='service-group';
+      const key=project.id+':'+group.name;
+      const header=document.createElement('button');header.className='group-header';header.dataset.groupToggle=key;header.setAttribute('aria-expanded',expandedGroups.has(key));
+      header.textContent=`${expandedGroups.has(key) ? '⌄' : '›'} ${group.name} · ${group.apps.filter(app=>app.services.some(s=>s.running)).length}/${group.apps.length} aktiv`;
+      const contents=document.createElement('div');contents.hidden=!expandedGroups.has(key);
+      for(const app of group.apps) {
+        const appKey=key+':'+app.key;
+        const wrapper=document.createElement('section');wrapper.className='app-section';
+        const title=document.createElement('button');title.className='app-header';title.dataset.appToggle=appKey;title.setAttribute('aria-expanded',expandedApps.has(appKey));
+        const active=app.services.find(s=>s.running && !s.activeElsewhere) || app.services.find(s=>s.running);
+        title.textContent=`${expandedApps.has(appKey) ? '⌄' : '›'} ${active ? '●' : '○'} ${app.name}${active?.ports.length ? ' · :'+active.ports.join(', :') : ''}`;
+        const scripts=document.createElement('div');scripts.hidden=!expandedApps.has(appKey);
+        for(const service of app.services) {const row=rows.get(service.id);if(row)scripts.append(row);}
+        wrapper.append(title,scripts);contents.append(wrapper);
+      }
+      section.append(header,contents);card.insertBefore(section,bottom);
+    }
   });
+}
+async function loadActivity() {
+  activityEntries=await call('activity',{projectId:activityProject || undefined,output:activityOutput});
+  if(view==='activity') renderActivity();
+}
+function renderActivity() {
+  $('#heading').textContent='Zentrales Protokoll';$('#subtitle').textContent='Aktionen, Prozesswechsel und erfasste Ausgabe.';
+  $('#content').innerHTML=`<div class="activity-controls"><select id="activityProject"><option value="">Alle Projekte</option>${current.projects.map(p=>`<option value="${p.id}" ${p.id===activityProject ? 'selected' : ''}>${escape(p.name)}</option>`).join('')}</select><label><input type="checkbox" id="activityOutput" ${activityOutput ? 'checked' : ''}> Konsole</label></div>${current.journalError ? `<p class="error">Protokoll konnte nicht gespeichert werden: ${escape(current.journalError)}</p>` : ''}<p class="activity-hint">Externe Aktionen werden beobachtet; deren Auslöser und Konsolenausgabe sind ohne gemeinsamen Startweg nicht bekannt.</p><div id="activityFeed">${activityEntries.slice().reverse().map(e=>`<article class="activity-entry"><div><time>${new Date(e.time).toLocaleString('de-DE')}</time><span>${escape(e.source || 'Dev Orbit')}${e.pid ? ' · PID '+e.pid : ''}</span></div><b>${escape(e.projectName || 'Dev Orbit')}${e.serviceName ? ' / '+escape(e.serviceName) : ''}</b><pre>${escape(e.message)}</pre></article>`).join('') || '<p>Noch keine Ereignisse aufgezeichnet.</p>'}</div>`;
 }
 function projectCard(p) {
   return `<article class="card ${expanded.has(p.id) ? 'expanded' : ''}"><div class="card-head" role="button" tabindex="0" data-toggle="${p.id}" aria-expanded="${expanded.has(p.id)}"><div class="project-icon">◈</div><div class="card-title"><h2>${escape(p.name)}</h2><div class="path" title="${escape(p.directory)}">${escape(p.directory)}</div></div><span class="badge ${p.services.some(s => s.running) ? '' : 'idle'}">${p.services.filter(s => s.running).length}/${p.services.length} aktiv</span><span class="chevron">${expanded.has(p.id) ? '⌄' : '›'}</span></div>${p.services.map(s => `<div class="service"><div class="service-top"><span class="service-name"><span class="dot ${s.running ? '' : 'off'}"></span>${escape(s.name)}<span class="service-type">${escape(s.type)}</span></span><span class="badge ${s.running ? '' : 'idle'}">${s.running ? s.managed ? 'Läuft · Orbit' : 'Läuft · Extern' : 'Gestoppt'}</span></div><div class="service-meta"><span>${s.ports.length ? s.ports.map(n => ':' + n).join(' · ') : 'Kein Port konfiguriert'}</span>${s.pids.length ? `<span>PID ${s.pids.join(', ')}</span>` : ''}${s.url ? `<span>${escape(s.url)}</span>` : ''}</div><div class="command">${escape(s.command)}</div><div class="service-actions">${button('▶ Start','start',`data-p="${p.id}" data-s="${s.id}"`,s.running)}${button('↻ Restart','restart',`data-p="${p.id}" data-s="${s.id}"`,!s.managed)}${button('■ Stop','stop',`data-p="${p.id}" data-s="${s.id}"`,!s.managed)}${s.url ? button('↗ Öffnen','open',`data-url="${escape(s.url)}"`) : ''}${button('Logs','logs',`data-s="${s.id}"`)}${button('Bearbeiten','editService',`data-p="${p.id}" data-s="${s.id}"`,s.managed)}${button('×','deleteService',`data-p="${p.id}" data-s="${s.id}"`,s.managed)}</div></div>`).join('') || '<div class="service"><p>Noch keine Services. Füge Frontend, Backend oder Datenbank hinzu.</p></div>'}<div class="card-bottom"><span>⑂ ${escape(p.branch)}</span><div>${button('+ Service','newService',`data-p="${p.id}"`)}${button('•••','editProject',`data-p="${p.id}"`)}</div></div></article>`;
@@ -57,7 +88,7 @@ function renderProcesses() {
 }
 function renderSettings() {
   $('#heading').textContent = 'Einstellungen'; $('#subtitle').textContent = 'Dein lokaler Begleiter, so wie du ihn brauchst.';
-  $('#content').innerHTML = `<div class="card settings"><h2>Windows-Integration</h2><div class="settings-row"><div><b>Mit Windows starten</b><p>Dev Orbit beim Anmelden im System-Tray starten.</p></div><input type="checkbox" id="autoStart" ${current.autoStart ? 'checked' : ''}></div><div class="settings-row"><div><b>System-Tray</b><p>Klicke auf das Tray-Icon, um dieses Fenster zu öffnen. Ein Klick außerhalb blendet es aus. Rechtsklick auf das Icon bietet Beenden.</p></div></div><div class="settings-row"><div><b>Lokale Daten</b><p>Projektkonfiguration wird im Windows-Benutzerprofil gespeichert. Logs bleiben für diese App-Sitzung verfügbar. Gestartete Services laufen beim Beenden weiter.</p></div></div><p>Version 1.2.1 · Windows-first · Keine Cloud erforderlich</p></div>`;
+  $('#content').innerHTML = `<div class="card settings"><h2>Windows-Integration</h2><div class="settings-row"><div><b>Mit Windows starten</b><p>Dev Orbit beim Anmelden im System-Tray starten.</p></div><input type="checkbox" id="autoStart" ${current.autoStart ? 'checked' : ''}></div><div class="settings-row"><div><b>System-Tray</b><p>Klicke auf das Tray-Icon, um dieses Fenster zu öffnen. Ein Klick außerhalb blendet es aus. Rechtsklick auf das Icon bietet Beenden.</p></div></div><div class="settings-row"><div><b>Lokale Daten</b><p>Projektkonfiguration wird im Windows-Benutzerprofil gespeichert. Ereignisse und erfasste Konsolenausgabe werden dauerhaft und mit begrenzter Historie gespeichert. Gestartete Services laufen beim Beenden weiter.</p></div></div><p>Version 1.3 · Windows-first · Keine Cloud erforderlich</p></div>`;
 }
 function field(name, label, value = '', placeholder = '') { return `<label for="f-${name}">${label}</label><input id="f-${name}" name="${name}" value="${escape(value)}" placeholder="${escape(placeholder)}">`; }
 function editProject(project) {
@@ -70,10 +101,12 @@ function editService(projectId, service) {
 }
 function openEditor() { $('#formError').textContent = ''; $('#editor').showModal(); }
 document.addEventListener('click', async event => {
+  const group=event.target.closest('[data-group-toggle]');if(group){const key=group.dataset.groupToggle;if(expandedGroups.has(key))expandedGroups.delete(key);else expandedGroups.add(key);render();return;}
+  const app=event.target.closest('[data-app-toggle]');if(app){const key=app.dataset.appToggle;if(expandedApps.has(key))expandedApps.delete(key);else expandedApps.add(key);render();return;}
   const projectHeader = event.target.closest('[data-toggle]');
   if (projectHeader) { const id = projectHeader.dataset.toggle; if (expanded.has(id)) expanded.delete(id); else expanded.add(id); render(); return; }
   const el = event.target.closest('button'); if (!el) return;
-  if (el.dataset.view) { view = el.dataset.view; selected = null; render(); return; }
+  if (el.dataset.view) { view = el.dataset.view; selected = null; render(); if(view==='activity') loadActivity().catch(error=>toast(error.message)); return; }
   if (el.dataset.project) { selected = el.dataset.project; view = 'overview'; render(); return; }
   const action = el.dataset.action; if (!action) return;
   try {
@@ -92,6 +125,7 @@ document.addEventListener('click', async event => {
   } catch(error) { toast(error.message); } finally { if (el.isConnected) el.disabled = false; }
 });
 document.addEventListener('change', async event => { try { if (event.target.dataset.assign && event.target.value) await call('assign',{pid:Number(event.target.dataset.assign),projectId:event.target.value}); if (event.target.id === 'autoStart') await call('autoStart',{enabled:event.target.checked}); } catch(error) { toast(error.message); } });
+document.addEventListener('change',event=>{if(event.target.id==='activityProject'){activityProject=event.target.value;loadActivity().catch(error=>toast(error.message));}if(event.target.id==='activityOutput'){activityOutput=event.target.checked;loadActivity().catch(error=>toast(error.message));}});
 $('#editForm').addEventListener('submit', async event => { event.preventDefault(); try { const data = Object.fromEntries(new FormData(event.target)); await call(editing.kind === 'project' ? 'saveProject' : 'saveService',{...data,id:editing.id,projectId:editing.projectId}); $('#editor').close(); current = await call('state'); render(); } catch(error) { $('#formError').textContent = error.message; } });
 $('#addProject').onclick = $('#addProjectSmall').onclick = () => editProject();
 $('#hidePanel').onclick = () => call('hide').catch(error => toast(error.message));
@@ -104,4 +138,9 @@ $('#closeLogs').onclick = () => $('#logsModal').close();
 $('#refreshLogs').onclick = async () => { try { $('#logsText').textContent = await call('logs',{serviceId:logService}); } catch(error) { toast(error.message); } };
 $('#refresh').onclick = async () => { try { $('#refresh').disabled = true; await call('scan'); } catch(error) { toast(error.message); } finally { $('#refresh').disabled = false; } };
 window.orbit.subscribe(data => { current = data; render(); });
+let activityTimer;
+window.orbit.onActivity(entry=>{
+  if($('#logsModal').open && logService) {clearTimeout(activityTimer);activityTimer=setTimeout(()=>call('logs',{serviceId:logService}).then(text=>{const el=$('#logsText');const bottom=el.scrollHeight-el.scrollTop-el.clientHeight<30;el.textContent=text;if(bottom)el.scrollTop=el.scrollHeight;}).catch(error=>toast(error.message)),200);}
+  if(view==='activity' && (!activityProject || entry.projectId===activityProject) && (activityOutput || !['stdout','stderr'].includes(entry.kind))) {activityEntries.push(entry);activityEntries=activityEntries.slice(-500);renderActivity();}
+});
 call('state').then(data => { current = data; render(); }).catch(error => toast(error.message));

@@ -21,7 +21,23 @@ npm.cmd run check
 npm.cmd run dist
 ```
 
-The Windows installer is written to `dist/`. Project configuration is stored in `%APPDATA%/dev-orbit/projects.json`; logs are bounded in-memory buffers for the current app session.
+The Windows installer is written to `dist/`. Project configuration is stored in `%APPDATA%/dev-orbit/projects.json`. Activity and captured stdout/stderr are persisted in `activity.jsonl` with one rotated archive (4 MiB each); the UI retains the latest 3000 events in memory.
+
+## Shared process and console
+
+The hierarchy is Project → Frontend / Backend / Databases → Apps → script actions. Script aliases for an app stay under one app. The Activity tab shows actions, outcomes, process/port changes and captured process output. Individual Logs also update live and include stop outcomes for externally started services. History survives app restarts. External changes are observed while Dev Orbit is running, on the six-second scan cadence; their caller and exit code are not known. Short-lived processes between scans can be missed. Earlier actions before logging was introduced cannot be reconstructed.
+
+For a full shared console, keep Dev Orbit running in the tray and start through the included CLI. From a packaged `win-unpacked` directory:
+
+```powershell
+.\dev-orbit.cmd list
+.\dev-orbit.cmd start "OskarLab" "frontend · dev" --follow
+.\dev-orbit.cmd logs "OskarLab" "frontend · dev" --follow
+```
+
+During development the equivalent is `node src/orbit-cli.cjs ...`. IntelliJ can use this as a run command; coding agents and terminals can invoke the same CLI. Start reuses an already running instance instead of launching another. The app owns the process, captures its stdout/stderr, and streams the same captured entries to the tool and CLI. Ctrl+C in the CLI only disconnects the viewer; Stop in the tool manages the actual process. Stop is also available via the CLI and retains native confirmation for external processes.
+
+The local named-pipe connection authenticates with a random token stored in the user's app-data profile. The CLI only controls existing configured services and does not accept arbitrary commands. Node.js is required for the CLI launcher. The CLI reports when an existing externally started process has no captured console. Its old terminal stdout/stderr cannot be attached retrospectively; to capture that output, deliberately restart through Dev Orbit once. Logs are stored as emitted by the process. The app must remain running to capture ongoing output.
 
 ## Discovery and process safety
 
@@ -39,11 +55,11 @@ Every six seconds Dev Orbit queries `Win32_Process` and `Get-NetTCPConnection` i
 
 Windows does not expose arbitrary process working directories through CIM. Relative commands started outside Dev Orbit can therefore remain unassigned. Restricted processes may have no readable command line. UDP endpoints and Docker container metadata are not yet integrated; published Docker TCP ports appear as Windows listeners.
 
-Start executes the configured PowerShell command with the current user's permissions. Stop/restart kills the process tree started by Dev Orbit. External processes can be terminated only through the process view, after a native confirmation and creation-time check; only that PID is terminated. No automatic process termination or administrator elevation is performed. Service status for externally launched processes uses the assigned project plus the service's configured ports. Logs are only captured for services started by Dev Orbit.
+Start executes the configured PowerShell command with the current user's permissions. Stop/restart kills the process tree started by Dev Orbit. External project processes can be terminated from their service or process view after native confirmation and creation-time checks; selected PIDs are terminated. No automatic process termination or administrator elevation is performed. Service status for externally launched processes uses project ownership, process lineage and configured ports. Console output is captured for services started by Dev Orbit; actions and observed lifecycle changes are logged for external services as well.
 
 An optional PowerShell stop command runs first (10-second timeout), followed by termination of any remaining owned process tree. This is useful for `docker compose down` when a service was started with `docker compose up` in the foreground. Detached containers require a later Docker integration.
 
-Exiting leaves services running. After restarting Dev Orbit, surviving services are discovered as external processes and can be manually assigned if their command line does not identify the project. Stop them before exiting if desired. Persistent log history is a future extension.
+Exiting does not explicitly terminate services, but closes console capture and the CLI connection. Surviving services are discovered as external processes after restarting Dev Orbit. Stop services before exiting if ongoing capture is needed; a separate always-running broker is not implemented.
 
 ## Structure
 

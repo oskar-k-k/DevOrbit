@@ -1,0 +1,5 @@
+const {test}=require('node:test');const assert=require('node:assert/strict');const {hierarchy}=require('../src/hierarchy.cjs');
+test('Project hierarchy groups frontend apps, scripts, backend and separate databases',()=>{
+ const project={directory:'C:\\Repo',services:[{id:'all',name:'frontend · dev',type:'Launcher',directory:'C:\\Repo\\frontend'},{id:'dev',name:'dev',type:'Frontend',directory:'C:\\Repo\\frontend\\apps\\cloth-lab'},{id:'start',name:'start',type:'Frontend',directory:'C:\\Repo\\frontend\\apps\\cloth-lab'},{id:'api',name:'API',type:'Backend',directory:'C:\\Repo\\backend'},{id:'pg',name:'Postgres',type:'Database',directory:'C:\\Repo',composeService:'pg'},{id:'redis',name:'Redis',type:'Database',directory:'C:\\Repo',composeService:'redis'}]};
+ const groups=hierarchy(project);assert.deepEqual(groups.map(g=>g.name),['Frontend','Backend','Datenbanken']);assert.equal(groups[0].apps.length,2);assert.equal(groups[0].apps[1].name,'cloth-lab');assert.equal(groups[0].apps[1].services.length,2);assert.equal(groups[2].apps.length,2);
+});

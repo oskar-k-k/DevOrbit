@@ -11,6 +11,8 @@ const { discoverProject, resolveServices, startConflict } = require('./discovery
 const { Journal, formatEntries } = require('./journal.cjs');
 const { createBridge } = require('./bridge.cjs');
 const { hierarchy } = require('./hierarchy.cjs');
+const {localStatus,dockerInventory,dockerStatus}=require('./dev-project.cjs');
+const standardStates=new Map(), projectLogOffsets=new Map();
 if (process.argv.includes('--smoke-test')) app.setPath('userData', path.join(__dirname, '..', '.smoke-profile'));
 let win, tray, quitting = false, config, configFile, scanning = false;
 let nativeDialogOpen = 0, lastBlur = 0;
@@ -40,7 +42,18 @@ function addLog(serviceId, chunk, kind='stdout') {
   const text=chunk.toString(); logs.set(serviceId, ((logs.get(serviceId) || '') + text).slice(-100000));
   for(let offset=0;offset<text.length;offset+=12000) record({...sessionContexts.get(serviceId),kind,source:kind==='stdout' || kind==='stderr' ? 'Prozessausgabe' : 'Dev Orbit',message:text.slice(offset,offset+12000)});
 }
-function serviceLog(serviceId) {
+async function serviceLog(serviceId) {
+  for(const project of config.projects) {
+    const service=servicesFor(project).find(s=>s.id===serviceId);
+    if(!service?.projectStandard) continue;
+    if(service.composeFile) {
+      const status=standardStates.get(project.id+':'+serviceId);
+      if(status?.containers?.length) {const result=await exec('docker.exe',['logs','--tail','300',status.containers[0]],{windowsHide:true,timeout:10000,maxBuffer:2*1024*1024});return result.stdout+result.stderr;}
+      return status?.statusError || 'Kein zugehöriger Container vorhanden.';
+    }
+    const file=path.join(project.directory,'.dev/logs',service.key+'.log');
+    if(fs.existsSync(file)){const handle=fs.openSync(file,'r');try{const size=fs.fstatSync(handle).size;const buffer=Buffer.alloc(Math.min(size,100000));fs.readSync(handle,buffer,0,buffer.length,size-buffer.length);return buffer.toString('utf8');}finally{fs.closeSync(handle);}}
+  }
   const entries = journal.query({serviceId,limit:1000});
   const hasOutput=entries.some(e=>e.kind==='stdout' || e.kind==='stderr');
   return (hasOutput ? 'Prozessausgabe und Ereignisse.\n\n' : 'Ereignisprotokoll. Die stdout/stderr-Konsole extern gestarteter Prozesse wurde nicht erfasst. Für eine gemeinsame Konsole über Dev Orbit / den Orbit-CLI starten.\n\n') + (formatEntries(entries) || 'Noch keine Ereignisse aufgezeichnet. Frühere Aktionen vor dieser Version sind nicht rekonstruierbar.');
@@ -65,7 +78,13 @@ async function bridgeAction(request) {
 function serviceState(project, service) {
   return servicesFor(project).find(s => s.id === service.id) || service;
 }
-function servicesFor(project) { return resolveServices(project, discoveries.get(project.id)?.services || [], inventory, owned); }
+function servicesFor(project) { return resolveServices(project, discoveries.get(project.id)?.services || [], inventory, owned).map(service=>{
+  if(!service.projectStandard)return service;
+  const current=standardStates.get(project.id+':'+service.id);
+  if(!current)return service;
+  const ports=current.ports?.length ? current.ports : service.ports;
+  return {...service,...current,ports,managed:false,activeElsewhere:false,url:['Frontend','Backend'].includes(service.type) && current.ports?.length ? 'http://localhost:'+current.ports[0] : '',startDisabled:!!current.statusError};
+}); }
 async function refreshDiscovery(project, force = false) {
   const cached = discoveries.get(project.id);
   if (!force && cached && cached.directory === project.directory && Date.now() - cached.scannedAt < 30000) return;
@@ -82,8 +101,8 @@ function publish() {
       ...current.projects.map(p => ({ label: `${p.name}  ${p.services.filter(s => s.running).length}/${p.services.length}`, submenu: [
         { label: `Branch: ${p.branch}`, enabled: false },
         ...p.services.map(s => ({ label: `${s.running ? '●' : '○'} ${s.name}`, submenu: [
-          { label: 'Starten', enabled: !s.running && !!s.command, click: () => start(p.id, s.id).catch(report) },
-          { label: 'Stoppen', enabled: s.running, click: () => stop(p.id, s.id).catch(report) },
+          { label: 'Starten', enabled: !s.running && !!s.command && !s.startDisabled, click: () => start(p.id, s.id).catch(report) },
+          { label: 'Stoppen', enabled: s.running && (!s.projectStandard || !!s.composeFile || s.registered), click: () => stop(p.id, s.id).catch(report) },
           ...(s.url ? [{ label: 'Im Browser öffnen', click: () => openUrl(s.url).catch(report) }] : [])
         ] })) ] })),
       { type: 'separator' }, { label: `${inventory.length} Projektprozesse`, enabled: false },
@@ -104,6 +123,24 @@ async function performScan() {
     const all = JSON.parse(stdout.replace(/^\uFEFF/, ''));
     allListeners = all.filter(p => p.ports.length);
     const assigned = associate(all, config.projects, owned);
+    let containers,dockerError;
+    if(config.projects.some(p=>discoveries.get(p.id)?.services.some(s=>s.projectStandard && s.composeFile))) {try{containers=await dockerInventory();}catch(error){dockerError='Docker nicht erreichbar: '+error.message;}}
+    for(const project of config.projects) for(const service of discoveries.get(project.id)?.services || []) {
+      if(!service.projectStandard)continue;
+      const standard={root:project.directory};
+      const current=service.composeFile ? (dockerError ? {running:false,pids:[],ports:[],statusError:dockerError} : dockerStatus(service,containers)) : localStatus(standard,service,all);
+      const previous=standardStates.get(project.id+':'+service.id);
+      standardStates.set(project.id+':'+service.id,current);
+      if(service.composeFile && (!previous || previous.running!==current.running || previous.statusError!==current.statusError || JSON.stringify(previous.ports)!==JSON.stringify(current.ports)))record({projectId:project.id,projectName:project.name,serviceId:service.id,serviceName:service.name,kind:'docker-status',source:'Docker',ports:current.ports,message:current.statusError || (current.running ? 'Container läuft · Ports '+current.ports.join(', ') : 'Container gestoppt oder noch nicht vorhanden')});
+      const ids=new Set(current.pids);
+      for(const p of assigned)if(ids.has(p.pid)){p.projectId=project.id;p.serviceId=service.id;p.reason=current.registered ? 'Projekt-Starter: PID und Startzeit geprüft' : 'Projektpfad und Dienstmerkmal';}
+      const file=path.join(project.directory,'.dev/logs',service.key+'.log');
+      if(fs.existsSync(file)) {
+        const size=fs.statSync(file).size;let offset=projectLogOffsets.get(file) ?? Math.max(0,size-20000);if(size<offset)offset=0;
+        if(size>offset){const handle=fs.openSync(file,'r');try{const buffer=Buffer.alloc(Math.min(size-offset,100000));fs.readSync(handle,buffer,0,buffer.length,offset);sessionContexts.set(service.id,{projectId:project.id,projectName:project.name,serviceId:service.id,serviceName:service.name});addLog(service.id,buffer.toString('utf8'));offset+=buffer.length;}finally{fs.closeSync(handle);}}
+        projectLogOffsets.set(file,offset);
+      }
+    }
     inventory = projectProcesses(assigned.filter(p => p.pid !== process.pid), config.projects, config.assignments);
     inventory = annotateLineage(inventory,all);
     journal.observe(inventory,all,processContext);
@@ -120,6 +157,11 @@ async function start(projectId, serviceId) {
   await scan();
   if (scanError) throw new Error('Start verhindert: Der aktuelle Prozessstatus konnte nicht geprüft werden.');
   const { project, service } = find(projectId, serviceId);
+  if(service.projectStandard) {
+    if(service.statusError)throw Error(service.statusError);
+    const result=await exec('node',[path.join(project.directory,'scripts/dev-runner.cjs'),'start',service.key],{cwd:project.directory,windowsHide:true,timeout:180000,maxBuffer:4*1024*1024});
+    record({...serviceContext(projectId,serviceId),kind:'start',source:'Projekt-Starter',message:result.stdout+result.stderr});await scan();return;
+  }
   const conflict = startConflict(service, servicesFor(project), allListeners);
   if (conflict) throw new Error(conflict);
   if (!service.command) throw new Error('Für diesen Prozess ist kein Startbefehl bekannt. Bitte zuerst konfigurieren.');
@@ -138,6 +180,10 @@ async function start(projectId, serviceId) {
 }
 async function stop(projectId, serviceId) {
   const { project, service } = find(projectId, serviceId);
+  if(service.projectStandard) {
+    const result=await exec('node',[path.join(project.directory,'scripts/dev-runner.cjs'),'stop',service.key],{cwd:project.directory,windowsHide:true,timeout:45000,maxBuffer:4*1024*1024});
+    record({...serviceContext(projectId,serviceId),kind:'stop',source:'Projekt-Starter',message:result.stdout+result.stderr || 'Dienst gestoppt'});await scan();return;
+  }
   record({...serviceContext(projectId,serviceId),kind:'stop-request',source:'Dev Orbit',message:`Stop angefordert · PID ${service.pids.join(', ') || 'wird geprüft'}`});
   const entry = [...owned.entries()].find(([, v]) => v.serviceId === serviceId);
   if (!entry) {
@@ -224,7 +270,7 @@ ipcMain.handle('orbit', async (_, action, data = {}) => {
     else if (action === 'start') await start(data.projectId, data.serviceId);
     else if (action === 'stop') await stop(data.projectId, data.serviceId);
     else if (action === 'restart') { await stop(data.projectId, data.serviceId); await start(data.projectId, data.serviceId); }
-    else if (action === 'logs') return { ok: true, value: serviceLog(data.serviceId) };
+    else if (action === 'logs') return { ok: true, value: await serviceLog(data.serviceId) };
     else if (action === 'activity') return { ok: true, value:journal.query({projectId:data.projectId,output:data.output!==false,limit:500}) };
     else if (action === 'open') await openUrl(data.url);
     else if (action === 'assign') { const p = inventory.find(p => p.pid === data.pid); if (!p || !config.projects.some(x => x.id === data.projectId)) throw new Error('Prozess oder Projekt fehlt.'); config.assignments[String(p.pid)] = { created: p.created, projectId: data.projectId }; save(); await scan(); }
@@ -269,7 +315,7 @@ else {
         await new Promise(resolve => setTimeout(resolve, 400));
         const hidesOnBlur = !win.isVisible();
         const rendered = await win.webContents.executeJavaScript("({title:document.title,heading:document.querySelector('h1').textContent,bridge:typeof window.orbit.call,node:typeof require})");
-        let lifecycle = false, discoveryUI = false, journalUI=false, cliReuse=false;
+        let lifecycle = false, discoveryUI = false, journalUI=false, cliReuse=false, standardUI=true;
         const smokeProject = { id: id(), name: 'Smoke test', directory: path.join(__dirname, '..'), services: [{ id: id(), name: 'Lifecycle', command: "Write-Output 'ORBIT_SMOKE'; Start-Sleep -Seconds 30", ports: [], directory: '', url: '' }] };
         config.projects.push(smokeProject);
         try {
@@ -289,11 +335,22 @@ else {
           await new Promise(resolve=>setTimeout(resolve,200));
           journalUI=journalUI && await win.webContents.executeJavaScript("document.querySelectorAll('.activity-entry').length > 0 && document.querySelector('.group-header') === null");
         } catch (error) { console.error(error.message); }
+        if(process.env.DEV_ORBIT_SMOKE_PROJECT) {
+          const standardProject={id:id(),name:'Standard integration',directory:process.env.DEV_ORBIT_SMOKE_PROJECT,services:[]};config.projects.push(standardProject);
+          try {
+            await scan();const resolved=servicesFor(standardProject);
+            standardUI=resolved.some(s=>s.key==='postgres' && s.running && s.ports.includes(10054)) && !resolved.some(s=>s.name.includes('deploy'));
+            await win.webContents.executeJavaScript("document.querySelector('[data-view=overview]').click()");
+            await new Promise(resolve=>setTimeout(resolve,200));
+            standardUI=standardUI && await win.webContents.executeJavaScript(`(() => {const header=document.querySelector('[data-toggle="${standardProject.id}"]');header.click();return header.closest('.card').textContent.includes('Datenbanken') && header.closest('.card').textContent.includes('Läuft · Docker');})()`);
+          }catch(error){console.error(error.message);standardUI=false;}
+          config.projects=config.projects.filter(p=>p.id!==standardProject.id);inventory=inventory.filter(p=>p.projectId!==standardProject.id);
+        }
         config.projects = config.projects.filter(p => p.id !== smokeProject.id);
         inventory = inventory.filter(p => p.projectId !== smokeProject.id);
         const projectOnly = inventory.every(p => config.projects.some(project => project.id === p.projectId));
-        console.log(JSON.stringify({ rendered, lifecycle, discoveryUI, journalUI, cliReuse, startsHidden, hidesOnBlur, size, projectOnly, processes: inventory.length, scanError }));
-        quitting = true; bridge?.close(); app.exit(scanError || !lifecycle || !discoveryUI || !journalUI || !cliReuse || !startsHidden || !hidesOnBlur || !projectOnly || rendered.bridge !== 'function' || rendered.node !== 'undefined' ? 1 : 0);
+        console.log(JSON.stringify({ rendered, lifecycle, discoveryUI, journalUI, cliReuse, standardUI, startsHidden, hidesOnBlur, size, projectOnly, processes: inventory.length, scanError }));
+        quitting = true; bridge?.close(); app.exit(scanError || !lifecycle || !discoveryUI || !journalUI || !cliReuse || !standardUI || !startsHidden || !hidesOnBlur || !projectOnly || rendered.bridge !== 'function' || rendered.node !== 'undefined' ? 1 : 0);
       });
     } else { scan(); setInterval(scan, 6000); }
   });

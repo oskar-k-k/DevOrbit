@@ -1,0 +1,58 @@
+# Lokale Entwicklung. Vorhandene npm-/Gradle-/Compose-Befehle bleiben unverändert.
+version: 1
+project: OskarLab
+services:
+  postgres:
+    group: datenbank
+    composeFile: backend/docker-compose.yml
+    composeService: postgres
+  backend:
+    group: backend
+    directory: backend
+    command: .\gradlew.bat bootRun
+    dependsOn:
+      - postgres
+  2d-lab:
+    group: frontend
+    directory: frontend/apps/2d-lab
+    npmScript: dev
+  chess:
+    group: frontend
+    directory: frontend/apps/chess
+    npmScript: dev
+  cloth-lab:
+    group: frontend
+    directory: frontend/apps/cloth-lab
+    npmScript: dev
+  core-design:
+    group: frontend
+    directory: frontend/apps/core-design
+    npmScript: dev
+  inside-llm:
+    group: frontend
+    directory: frontend/apps/inside-llm
+    npmScript: dev
+  neon-vault:
+    group: frontend
+    directory: frontend/apps/neon-vault
+    npmScript: dev
+  oskar-lab:
+    group: frontend
+    directory: frontend/apps/oskar-lab
+    npmScript: dev
+  portfolio:
+    group: frontend
+    directory: frontend/apps/portfolio
+    npmScript: dev
+  room-studio:
+    group: frontend
+    directory: frontend/apps/room-studio
+    npmScript: dev
+  tierlist-matcher:
+    group: frontend
+    directory: frontend/apps/tierlist-matcher
+    npmScript: dev
+  workout:
+    group: frontend
+    directory: frontend/apps/workout
+    npmScript: dev

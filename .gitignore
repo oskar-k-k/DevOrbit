@@ -4,6 +4,7 @@ dist-tray/
 dist-auto/
 dist-fixed/
 dist-journal/
+dist-standard/
 *.log
 electron-runtime.zip
 smoke-preview.png

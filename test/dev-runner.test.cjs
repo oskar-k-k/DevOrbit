@@ -1,0 +1,24 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const os=require('node:os');
+const path=require('node:path');
+const {execFile}=require('node:child_process');
+const {promisify}=require('node:util');
+const exec=promisify(execFile);
+test('Independent starter serializes simultaneous starts, survives caller exit and provides logs and verified stop',{skip:process.platform!=='win32',timeout:90000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'dev-runner-'));
+  const runner=path.resolve(__dirname,'../src/dev-runner.cjs');
+  const options={env:{...process.env,DEV_PROJECT_ROOT:root},windowsHide:true,timeout:60000,maxBuffer:1024*1024};
+  fs.writeFileSync(path.join(root,'app.cjs'),"require('node:net').createServer().listen(0,'127.0.0.1',()=>console.log('SHARED_STARTER_READY')); setInterval(()=>{},1000);");
+  fs.writeFileSync(path.join(root,'dev.yaml'),'version: 1\nproject: Test\nservices:\n  app:\n    group: frontend\n    command: node app.cjs\n');
+  t.after(async()=>{try{await exec(process.execPath,[runner,'stop','app'],options);}finally{fs.rmSync(root,{recursive:true,force:true});}});
+  const starts=await Promise.all([exec(process.execPath,[runner,'start','app'],options),exec(process.execPath,[runner,'start','app'],options)]);
+  assert.ok(starts.every(result=>result.stdout.includes('"running": true')));
+  const saved=JSON.parse(fs.readFileSync(path.join(root,'.dev/state/app.json'),'utf8'));
+  const result=await exec(process.execPath,[runner,'status','app'],options);assert.ok(result.stdout.includes(String(saved.pid)));assert.ok(result.stdout.includes('"registered": true'));
+  const again=await exec(process.execPath,[runner,'start','app'],options);assert.ok(again.stdout.includes('läuft bereits'));assert.equal(JSON.parse(fs.readFileSync(path.join(root,'.dev/state/app.json'),'utf8')).pid,saved.pid);
+  const logs=await exec(process.execPath,[runner,'logs','app'],options);assert.ok(logs.stdout.includes('SHARED_STARTER_READY'));
+  await exec(process.execPath,[runner,'stop','app'],options);
+  const stopped=await exec(process.execPath,[runner,'status','app'],options);assert.ok(stopped.stdout.includes('"running": false'));
+});

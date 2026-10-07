@@ -18,23 +18,33 @@ function render() {
   const projects = selected ? current.projects.filter(p => p.id === selected) : current.projects;
   $('#heading').textContent = selected ? (projects[0]?.name || 'Projekt') : 'Deine Projekte';
   $('#subtitle').textContent = 'Projekt aufklappen, Services steuern.';
-  const running = current.processes.filter(p=>p.ports.length).length;
-  const ports = new Set(current.processes.flatMap(p => p.ports)).size;
+  const containers=current.projects.flatMap(p=>p.services).filter(s=>s.projectStandard && s.composeFile && s.running);
+  const running = current.processes.filter(p=>p.ports.length).length+containers.length;
+  const ports = new Set(current.processes.flatMap(p => p.ports).concat(containers.flatMap(s=>s.ports))).size;
   $('#content').innerHTML = `<div class="stats"><div class="stat"><span class="stat-label">Projekte</span><strong>${current.projects.length}</strong></div><div class="stat"><span class="stat-label">Apps mit Ports</span><strong>${running}</strong></div><div class="stat"><span class="stat-label">Projekt-Ports</span><strong>${ports}</strong></div></div>` + (projects.length ? `<div class="projects">${projects.map(projectCard).join('')}</div>` : `<div class="empty"><div class="empty-icon">◎</div><h2>Dein erstes Projekt</h2><p>Wähle einen Projektordner und füge seine Services hinzu.</p>${button('+ Projekt hinzufügen','newProject')}</div>`);
   enhanceProjectCards(projects);
 }
 function enhanceProjectCards(projects) {
   document.querySelectorAll('.projects > .card').forEach((card, index) => {
     const project = projects[index];
-    const listeners = current.processes.filter(p=>p.projectId===project.id && p.ports.length).length;
+    const listeners = project.services.some(s=>s.projectStandard) ? project.services.filter(s=>s.projectStandard && s.running).length : current.processes.filter(p=>p.projectId===project.id && p.ports.length).length;
     card.querySelector('.card-head > .badge').textContent = `${listeners} Apps aktiv`;
     card.querySelectorAll(':scope > .service').forEach((row, serviceIndex) => {
       const service = project.services[serviceIndex]; if (!service) return;
-      row.querySelector('[data-action=start]').disabled = service.running || !service.command;
+      row.querySelector('[data-action=start]').disabled = service.running || !service.command || service.startDisabled;
+      if(service.projectStandard) {
+        row.querySelector('[data-action=restart]').disabled=!service.running || (!service.registered && !service.composeFile);
+        row.querySelector('[data-action=editService]').disabled=true;
+        row.querySelector('[data-action=deleteService]').disabled=true;
+        row.querySelector('.service-top > .badge').textContent=service.statusError ? 'Status unbekannt' : service.running ? service.composeFile ? 'Läuft · Docker' : service.registered ? 'Läuft · Projekt-Starter' : 'Läuft · Extern' : 'Gestoppt';
+      }
       row.querySelector('[data-action=stop]').disabled = !service.running;
-      row.querySelector('[data-action=deleteService]').disabled = service.managed || service.runtimeOnly;
+      if(service.projectStandard && !service.composeFile && !service.registered)row.querySelector('[data-action=stop]').disabled=true;
+      if(service.statusError){const note=document.createElement('p');note.className='discovery-note';note.textContent=service.statusError;row.append(note);}
+      row.querySelector('[data-action=deleteService]').disabled = service.managed || service.runtimeOnly || service.projectStandard;
       if (service.runtimeOnly) row.querySelector('[data-action=editService]').textContent = 'Start konfigurieren';
       if (service.autoDetected) row.querySelector('.service-type').textContent = 'Auto · ' + service.type;
+      if (service.projectStandard) row.querySelector('.service-type').textContent = 'dev.yaml · ' + service.type;
       if (service.activeElsewhere) row.querySelector('.service-top > .badge').textContent = 'App bereits aktiv';
       if (service.duplicate) { const note = document.createElement('p'); note.className = 'discovery-note'; note.textContent = 'Mehrere Listener-Prozesse für diese App – mögliche Doppelstarts prüfen.'; row.append(note); }
       const command = row.querySelector('.command');
@@ -56,6 +66,7 @@ function enhanceProjectCards(projects) {
       const key=project.id+':'+group.name;
       const header=document.createElement('button');header.className='group-header';header.dataset.groupToggle=key;header.setAttribute('aria-expanded',expandedGroups.has(key));
       header.textContent=`${expandedGroups.has(key) ? '⌄' : '›'} ${group.name} · ${group.apps.filter(app=>app.services.some(s=>s.running)).length}/${group.apps.length} aktiv`;
+      const unknown=group.apps.filter(app=>app.services.some(s=>s.statusError)).length;if(unknown)header.textContent+=' · '+unknown+' unbekannt';
       const contents=document.createElement('div');contents.hidden=!expandedGroups.has(key);
       for(const app of group.apps) {
         const appKey=key+':'+app.key;
@@ -88,7 +99,7 @@ function renderProcesses() {
 }
 function renderSettings() {
   $('#heading').textContent = 'Einstellungen'; $('#subtitle').textContent = 'Dein lokaler Begleiter, so wie du ihn brauchst.';
-  $('#content').innerHTML = `<div class="card settings"><h2>Windows-Integration</h2><div class="settings-row"><div><b>Mit Windows starten</b><p>Dev Orbit beim Anmelden im System-Tray starten.</p></div><input type="checkbox" id="autoStart" ${current.autoStart ? 'checked' : ''}></div><div class="settings-row"><div><b>System-Tray</b><p>Klicke auf das Tray-Icon, um dieses Fenster zu öffnen. Ein Klick außerhalb blendet es aus. Rechtsklick auf das Icon bietet Beenden.</p></div></div><div class="settings-row"><div><b>Lokale Daten</b><p>Projektkonfiguration wird im Windows-Benutzerprofil gespeichert. Ereignisse und erfasste Konsolenausgabe werden dauerhaft und mit begrenzter Historie gespeichert. Gestartete Services laufen beim Beenden weiter.</p></div></div><p>Version 1.3 · Windows-first · Keine Cloud erforderlich</p></div>`;
+  $('#content').innerHTML = `<div class="card settings"><h2>Windows-Integration</h2><div class="settings-row"><div><b>Mit Windows starten</b><p>Dev Orbit beim Anmelden im System-Tray starten.</p></div><input type="checkbox" id="autoStart" ${current.autoStart ? 'checked' : ''}></div><div class="settings-row"><div><b>System-Tray</b><p>Klicke auf das Tray-Icon, um dieses Fenster zu öffnen. Ein Klick außerhalb blendet es aus. Rechtsklick auf das Icon bietet Beenden.</p></div></div><div class="settings-row"><div><b>Lokale Daten</b><p>Projektkonfiguration wird im Windows-Benutzerprofil gespeichert. Ereignisse und erfasste Konsolenausgabe werden dauerhaft und mit begrenzter Historie gespeichert. Gestartete Services laufen beim Beenden weiter.</p></div></div><p>Version 1.4 · Windows-first · Keine Cloud erforderlich</p></div>`;
 }
 function field(name, label, value = '', placeholder = '') { return `<label for="f-${name}">${label}</label><input id="f-${name}" name="${name}" value="${escape(value)}" placeholder="${escape(placeholder)}">`; }
 function editProject(project) {
@@ -137,10 +148,17 @@ $('#closeModal').onclick = $('#cancelModal').onclick = () => $('#editor').close(
 $('#closeLogs').onclick = () => $('#logsModal').close();
 $('#refreshLogs').onclick = async () => { try { $('#logsText').textContent = await call('logs',{serviceId:logService}); } catch(error) { toast(error.message); } };
 $('#refresh').onclick = async () => { try { $('#refresh').disabled = true; await call('scan'); } catch(error) { toast(error.message); } finally { $('#refresh').disabled = false; } };
-window.orbit.subscribe(data => { current = data; render(); });
+let logRefreshing=false;
+async function refreshOpenLogs() {
+  if(!$('#logsModal').open || !logService || logRefreshing)return;
+  logRefreshing=true;const serviceId=logService;
+  try{const text=await call('logs',{serviceId});if(serviceId===logService){const el=$('#logsText');const bottom=el.scrollHeight-el.scrollTop-el.clientHeight<30;el.textContent=text;if(bottom)el.scrollTop=el.scrollHeight;}}
+  catch(error){toast(error.message);}finally{logRefreshing=false;}
+}
+window.orbit.subscribe(data => { current = data; render(); refreshOpenLogs(); });
 let activityTimer;
 window.orbit.onActivity(entry=>{
-  if($('#logsModal').open && logService) {clearTimeout(activityTimer);activityTimer=setTimeout(()=>call('logs',{serviceId:logService}).then(text=>{const el=$('#logsText');const bottom=el.scrollHeight-el.scrollTop-el.clientHeight<30;el.textContent=text;if(bottom)el.scrollTop=el.scrollHeight;}).catch(error=>toast(error.message)),200);}
+  if($('#logsModal').open && logService) {clearTimeout(activityTimer);activityTimer=setTimeout(refreshOpenLogs,200);}
   if(view==='activity' && (!activityProject || entry.projectId===activityProject) && (activityOutput || !['stdout','stderr'].includes(entry.kind))) {activityEntries.push(entry);activityEntries=activityEntries.slice(-500);renderActivity();}
 });
 call('state').then(data => { current = data; render(); }).catch(error => toast(error.message));

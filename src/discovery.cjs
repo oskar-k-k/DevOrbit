@@ -3,7 +3,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const YAML = require('yaml');
 const { inside } = require('./model.cjs');
-const ignored = new Set(['node_modules', '.git', '.venv', 'venv', 'dist', 'dist-tray', 'dist-auto', 'dist-fixed', 'dist-journal', 'build', 'target', 'bin', 'obj', '.next', '.idea', '.codex', '.smoke-profile', 'vendor', 'coverage']);
+const { loadProject } = require('./dev-project.cjs');
+const ignored = new Set(['node_modules', '.git', '.dev', '.venv', 'venv', 'dist', 'dist-tray', 'dist-auto', 'dist-fixed', 'dist-journal', 'dist-standard', 'build', 'target', 'bin', 'obj', '.next', '.idea', '.codex', '.smoke-profile', 'vendor', 'coverage']);
 const quote = text => "'" + String(text).replaceAll("'", "''") + "'";
 const stableId = (directory, key) => 'auto-' + crypto.createHash('sha256').update(path.resolve(directory).toLowerCase() + ':' + key).digest('hex').slice(0, 20);
 function portsIn(command) {
@@ -19,6 +20,8 @@ function fingerprint(command) {
   return script ? script[1].replaceAll('\\', '/').toLowerCase() : null;
 }
 async function discoverProject(directory) {
+  try { const standard=loadProject(directory); if(standard) return {services:standard.services,notes:['Projektstandard: '+standard.file],standard:true,scannedAt:Date.now()}; }
+  catch(error) {return {services:[],notes:['Projektstandard ungültig: '+error.message],standard:true,scannedAt:Date.now()};}
   const services = [], notes = []; let visited = 0;
   async function read(file) { const stat = await fs.stat(file); if (stat.size > 1024 * 1024) throw new Error('Datei zu groß'); return fs.readFile(file, 'utf8'); }
   async function walk(folder, depth) {

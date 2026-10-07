@@ -5,6 +5,8 @@ dist-auto/
 dist-fixed/
 dist-journal/
 dist-standard/
+!examples/OskarLab/scripts/vendor/yaml/dist/
+!examples/OskarLab/scripts/vendor/yaml/dist/**
 *.log
 electron-runtime.zip
 smoke-preview.png
